@@ -4,210 +4,252 @@ import librosa
 import soundfile as sf
 from tkinter import Tk, Button, Label, filedialog, messagebox
 
-# Función para extraer características de una canción
+# ==================== [1. Extracción de Características Optimizada] ====================
 def extract_features(file_path):
-    y, sr = sf.read(file_path)
-    y = y.astype(np.float32)
-    y = librosa.util.normalize(y)
-
-    # Extraer características
-    mfccs = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
+    try:
+        y, sr = librosa.load(file_path, sr=None, duration=30)  # Limitar a 30s para consistencia
+    except Exception as e:
+        raise RuntimeError(f"Error al cargar el archivo: {str(e)}")
+    
+    y = librosa.util.normalize(y)  # Normalización correcta
+    
+    # MFCCs (20 coeficientes)
+    mfccs = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=20)
     mfccs_mean = np.mean(mfccs, axis=1)
-
-    mel_spectrogram = librosa.feature.melspectrogram(y=y, sr=sr)
+    mfccs_var = np.var(mfccs, axis=1)
+    
+    # Espectrograma MEL
+    mel_spectrogram = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=128)
     mel_spectrogram_db = librosa.power_to_db(mel_spectrogram, ref=np.max)
     mel_mean = np.mean(mel_spectrogram_db, axis=1)
-
+    
+    # Características temporales
     tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
-    zero_crossing_rate = np.mean(librosa.feature.zero_crossing_rate(y))
-    energy = np.sum(y**2)
-
-    features = np.hstack([mfccs_mean, mel_mean, tempo, zero_crossing_rate, energy])
+    zero_crossing_rate = np.mean(librosa.feature.zero_crossing_rate(y=y))
+    energy = np.mean(y**2)  # Energía normalizada
+    
+    # Características armónicas
+    harmonic = librosa.effects.harmonic(y)
+    harmonic_mean = np.mean(harmonic)
+    
+    features = np.hstack([
+        mfccs_mean, 
+        mfccs_var,
+        mel_mean, 
+        tempo, 
+        zero_crossing_rate, 
+        energy,
+        harmonic_mean
+    ])
+    
     return features
 
-# Normalización manual (reemplazo de StandardScaler)
-def manual_scaler(X):
-    mean = np.mean(X, axis=0)
-    std = np.std(X, axis=0)
-    X_scaled = (X - mean) / std
-    return X_scaled, mean, std
-
-# Codificación manual de etiquetas (reemplazo de LabelEncoder)
-def manual_label_encoder(y):
-    unique_labels = np.unique(y)
-    label_to_code = {label: i for i, label in enumerate(unique_labels)}
-    y_encoded = np.array([label_to_code[label] for label in y])
-    return y_encoded, label_to_code
-
-# División manual del dataset (reemplazo de train_test_split)
-def manual_train_test_split(X, y, test_size=0.2, random_state=None):
-    if random_state:
-        np.random.seed(random_state)
+# ==================== [2. Preprocesamiento Mejorado] ====================
+class AudioPreprocessor:
+    def __init__(self):
+        self.mean = None
+        self.std = None
+        self.label_encoder = None
     
-    indices = np.arange(X.shape[0])
-    np.random.shuffle(indices)
+    def fit(self, X, y):
+        # Manejo de desviación estándar cero
+        epsilon = 1e-8
+        self.mean = np.mean(X, axis=0)
+        self.std = np.std(X, axis=0) + epsilon
+        
+        # Codificación de etiquetas
+        unique_labels = np.unique(y)
+        self.label_encoder = {label: i for i, label in enumerate(unique_labels)}
     
-    test_samples = int(X.shape[0] * test_size)
+    def transform(self, X, y=None):
+        X_scaled = (X - self.mean) / self.std
+        
+        if y is not None:
+            y_encoded = np.array([self.label_encoder[label] for label in y])
+            return X_scaled, y_encoded
+        
+        return X_scaled
     
-    X_train = X[indices[test_samples:]]
-    X_test = X[indices[:test_samples]]
-    y_train = y[indices[test_samples:]]
-    y_test = y[indices[:test_samples]]
-    
-    return X_train, X_test, y_train, y_test
+    def inverse_transform_labels(self, y):
+        decoder = {v: k for k, v in self.label_encoder.items()}
+        return np.array([decoder[label] for label in y])
 
-# Cargar el dataset completo
-dataset_path = 'genres'  # Cambia esto a la ruta de tu dataset
-genres = os.listdir(dataset_path)
-X = []
-y = []
-
-for genre in genres:
-    genre_path = os.path.join(dataset_path, genre)
-    for file_name in os.listdir(genre_path):
-        file_path = os.path.join(genre_path, file_name)
-        features = extract_features(file_path)
-        X.append(features)
-        y.append(genre)
-
-# Convertir a arrays de numpy
-X = np.array(X)
-y = np.array(y)
-
-# Codificar las etiquetas manualmente
-y_encoded, label_to_code = manual_label_encoder(y)
-
-# Normalizar las características manualmente
-X_scaled, mean, std = manual_scaler(X)
-
-# Dividir el dataset manualmente
-X_train, X_test, y_train, y_test = manual_train_test_split(X_scaled, y_encoded, test_size=0.4, random_state=42)
-
-# Implementación del MLP desde cero
+# ==================== [3. MLP Mejorado con Softmax y Entropía Cruzada] ====================
 class MLP:
     def __init__(self, input_size, hidden_size, output_size):
-        # Inicialización de pesos y sesgos
-        self.W1 = np.random.randn(input_size, hidden_size) * 0.01
+        # Inicialización He
+        self.W1 = np.random.randn(input_size, hidden_size) * np.sqrt(2 / input_size)
         self.b1 = np.zeros(hidden_size)
-        self.W2 = np.random.randn(hidden_size, output_size) * 0.01
+        self.W2 = np.random.randn(hidden_size, output_size) * np.sqrt(2 / hidden_size)
         self.b2 = np.zeros(output_size)
+        self.loss_history = []
 
-    def sigmoid(self, x):
+    def _sigmoid(self, x):
         return 1 / (1 + np.exp(-x))
 
-    def sigmoid_derivative(self, x):
-        return x * (1 - x)
+    def _softmax(self, x):
+        exps = np.exp(x - np.max(x, axis=1, keepdims=True))
+        return exps / np.sum(exps, axis=1, keepdims=True)
 
     def forward(self, X):
-        # Propagación hacia adelante
         self.z1 = np.dot(X, self.W1) + self.b1
-        self.a1 = self.sigmoid(self.z1)
+        self.a1 = self._sigmoid(self.z1)
         self.z2 = np.dot(self.a1, self.W2) + self.b2
-        self.a2 = self.sigmoid(self.z2)
+        self.a2 = self._softmax(self.z2)
         return self.a2
 
-    def backward(self, X, y, output, learning_rate):
-        # Propagación hacia atrás
-        error = output - y
-        d_output = error * self.sigmoid_derivative(output)
-        d_hidden = np.dot(d_output, self.W2.T) * self.sigmoid_derivative(self.a1)
+    def _cross_entropy_loss(self, y, probs):
+        m = y.shape[0]
+        log_probs = -np.log(probs[range(m), y])
+        return np.sum(log_probs) / m
 
-        # Actualización de pesos y sesgos
-        self.W2 -= learning_rate * np.dot(self.a1.T, d_output)
-        self.b2 -= learning_rate * np.sum(d_output, axis=0)
-        self.W1 -= learning_rate * np.dot(X.T, d_hidden)
-        self.b1 -= learning_rate * np.sum(d_hidden, axis=0)
+    def backward(self, X, y, lr):
+        m = X.shape[0]
+        
+        # Capa de salida
+        delta3 = self.a2
+        delta3[range(m), y] -= 1
+        delta3 /= m
+        
+        # Capa oculta
+        delta2 = np.dot(delta3, self.W2.T) * (self.a1 * (1 - self.a1))
+        
+        # Gradientes
+        dW2 = np.dot(self.a1.T, delta3)
+        db2 = np.sum(delta3, axis=0)
+        dW1 = np.dot(X.T, delta2)
+        db1 = np.sum(delta2, axis=0)
 
-    def train(self, X, y, epochs, learning_rate):
-        # Entrenamiento del modelo
+        # Actualización con momento
+        self.W2 -= lr * dW2
+        self.b2 -= lr * db2
+        self.W1 -= lr * dW1
+        self.b1 -= lr * db1
+
+    def train(self, X, y, epochs=1000, lr=0.01, batch_size=32, val_data=None):
         for epoch in range(epochs):
-            output = self.forward(X)
-            self.backward(X, y, output, learning_rate)
+            # Mini-batch
+            indices = np.random.permutation(X.shape[0])
+            for i in range(0, X.shape[0], batch_size):
+                batch_idx = indices[i:i+batch_size]
+                X_batch = X[batch_idx]
+                y_batch = y[batch_idx]
+                
+                self.forward(X_batch)
+                self.backward(X_batch, y_batch, lr)
+            
+            # Cálculo de pérdida
+            probs = self.forward(X)
+            loss = self._cross_entropy_loss(y, probs)
+            self.loss_history.append(loss)
+            
+            # Validación
+            if val_data and epoch % 10 == 0:
+                X_val, y_val = val_data
+                val_probs = self.forward(X_val)
+                val_loss = self._cross_entropy_loss(y_val, val_probs)
+                print(f"Epoch {epoch}: Train Loss={loss:.4f}, Val Loss={val_loss:.4f}")
 
     def predict(self, X):
-        # Predicción
-        output = self.forward(X)
-        return np.argmax(output, axis=1)
+        probs = self.forward(X)
+        return np.argmax(probs, axis=1)
 
-# Crear y entrenar el MLP
-input_size = X_train.shape[1]
-hidden_size = 10
-output_size = len(np.unique(y_train))
-
-mlp = MLP(input_size, hidden_size, output_size)
-mlp.train(X_train, np.eye(output_size)[y_train], epochs=1000, learning_rate=0.01)
-
-# Función para calcular la precisión
-def accuracy(y_true, y_pred):
-    return np.mean(y_true == y_pred)
-
-# Predecir en los conjuntos de entrenamiento, validación y prueba
-y_pred_train = mlp.predict(X_train)
-y_pred_test = mlp.predict(X_test)
-
-# Calcular la precisión
-train_accuracy = accuracy(y_train, y_pred_train)
-test_accuracy = accuracy(y_test, y_pred_test)
-
-# Mostrar las métricas de evaluación
-print(f"Precisión en entrenamiento: {train_accuracy:.2f}")
-print(f"Precisión en prueba: {test_accuracy:.2f}")
-
-# Función para generar la matriz de confusión
-def confusion_matrix(y_true, y_pred):
-    classes = np.unique(y_true)
-    matrix = np.zeros((len(classes), len(classes)))
-    for i in range(len(y_true)):
-        matrix[y_true[i], y_pred[i]] += 1
-    return matrix
-
-# Generar y mostrar la matriz de confusión para el conjunto de prueba
-conf_matrix = confusion_matrix(y_test, y_pred_test)
-print("Matriz de confusión (Prueba):")
-print(conf_matrix)
-
-# Función para predecir el género de una canción específica
-def predict_genre(model, mean, std, label_to_code, file_path):
-    # Extraer características de la canción
-    features = extract_features(file_path)
+# ==================== [4. Carga de Dataset y Preprocesamiento] ====================
+def load_dataset(dataset_path='genres'):
+    genres = [g for g in os.listdir(dataset_path) if not g.startswith('.')]  # Ignorar archivos ocultos
+    X = []
+    y = []
     
-    # Normalizar las características
-    features_scaled = (features - mean) / std
+    for genre in genres:
+        genre_path = os.path.join(dataset_path, genre)
+        for file in os.listdir(genre_path):
+            if not file.lower().endswith(('.wav', '.mp3', '.ogg')):  # Filtrar formatos
+                continue
+                
+            file_path = os.path.join(genre_path, file)
+            try:
+                features = extract_features(file_path)
+                X.append(features)
+                y.append(genre)
+            except Exception as e:
+                print(f"Error procesando {file}: {str(e)}")
+                continue
     
-    # Predecir el género
-    prediction = model.predict([features_scaled])
-    
-    # Convertir la predicción numérica a la etiqueta de género
-    code_to_label = {v: k for k, v in label_to_code.items()}
-    predicted_genre = code_to_label[prediction[0]]
-    
-    return predicted_genre
+    return np.array(X), np.array(y)
 
-# Interfaz gráfica para subir archivos
-def upload_file():
-    file_path = filedialog.askopenfilename(
-        title="Selecciona un archivo de música",
-        filetypes=[("Audio Files", "*.wav *.mp3 *.ogg *.flac *.au")]
-    )
-    
-    if file_path:
+# ==================== [5. Interfaz Gráfica Mejorada] ====================
+class GenreClassifierApp:
+    def __init__(self, model, preprocessor):
+        self.model = model
+        self.preprocessor = preprocessor
+        self.root = Tk()
+        self.root.title("Clasificador de Géneros Musicales v2.0")
+        
+        self.create_widgets()
+        
+    def create_widgets(self):
+        Label(self.root, text="Seleccione un archivo de audio", font=('Arial', 12)).pack(pady=10)
+        Button(self.root, text="Cargar Archivo", command=self.predict_genre, 
+              bg='#4CAF50', fg='white').pack(pady=15)
+        
+    def predict_genre(self):
+        filetypes = [
+            ('Audio Files', '*.wav *.mp3 *.ogg'),
+            ('Todos los archivos', '*.*')
+        ]
+        
+        file_path = filedialog.askopenfilename(filetypes=filetypes)
+        if not file_path:
+            return
+            
         try:
-            # Predecir el género de la canción
-            predicted_genre = predict_genre(mlp, mean, std, label_to_code, file_path)
-            messagebox.showinfo("Predicción", f"El género predicho es: {predicted_genre}")
+            # Extraer y preprocesar características
+            raw_features = extract_features(file_path)
+            features = self.preprocessor.transform(raw_features.reshape(1, -1))
+            
+            # Predecir
+            prediction = self.model.predict(features)
+            genre = self.preprocessor.inverse_transform_labels(prediction)[0]
+            
+            # Mostrar resultado
+            messagebox.showinfo("Resultado", 
+                f"Género predicho:\n{genre.upper()}\n\nArchivo: {os.path.basename(file_path)}")
         except Exception as e:
-            messagebox.showerror("Error", f"No se pudo procesar el archivo: {e}")
+            messagebox.showerror("Error", f"Error de procesamiento:\n{str(e)}")
 
-# Crear la ventana principal
-root = Tk()
-root.title("Clasificador de Géneros Musicales")
+    def run(self):
+        self.root.mainloop()
 
-# Botón para subir archivo
-upload_button = Button(root, text="Subir archivo de música", command=upload_file)
-upload_button.pack(pady=20)
-
-# Etiqueta de instrucciones
-Label(root, text="Selecciona un archivo de música para predecir su género.").pack(pady=10)
-
-# Iniciar la interfaz gráfica
-root.mainloop()
+# ==================== [6. Ejecución Principal] ====================
+if __name__ == "__main__":
+    # Cargar y preprocesar datos
+    X, y = load_dataset()
+    preprocessor = AudioPreprocessor()
+    preprocessor.fit(X, y)
+    X_scaled, y_encoded = preprocessor.transform(X, y)
+    
+    # Dividir datos (60-20-20)
+    indices = np.random.permutation(len(X))
+    split_train = int(0.6 * len(X))
+    split_val = int(0.8 * len(X))
+    
+    X_train, y_train = X_scaled[indices[:split_train]], y_encoded[indices[:split_train]]
+    X_val, y_val = X_scaled[indices[split_train:split_val]], y_encoded[indices[split_train:split_val]]
+    X_test, y_test = X_scaled[indices[split_val:]], y_encoded[indices[split_val:]]
+    
+    # Entrenar modelo
+    mlp = MLP(input_size=X_train.shape[1], 
+             hidden_size=64,  # Aumentar capacidad
+             output_size=len(preprocessor.label_encoder))
+    
+    mlp.train(X_train, y_train, epochs=500, lr=0.001, batch_size=64,
+             val_data=(X_val, y_val))
+    
+    # Evaluación final
+    test_pred = mlp.predict(X_test)
+    accuracy = np.mean(test_pred == y_test)
+    print(f"\nPrecisión final en test: {accuracy:.2%}")
+    
+    # Iniciar interfaz
+    app = GenreClassifierApp(mlp, preprocessor)
+    app.run()
