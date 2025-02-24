@@ -163,7 +163,7 @@ def load_dataset(dataset_path='genres'):
     for genre in genres:
         genre_path = os.path.join(dataset_path, genre)
         for file in os.listdir(genre_path):
-            if not file.lower().endswith(('.wav', '.mp3', '.ogg')):  # Filtrar formatos
+            if not file.lower().endswith(('.wav', '.mp3', '.ogg', '.au')):  # Filtrar formatos
                 continue
                 
             file_path = os.path.join(genre_path, file)
@@ -194,7 +194,7 @@ class GenreClassifierApp:
         
     def predict_genre(self):
         filetypes = [
-            ('Audio Files', '*.wav *.mp3 *.ogg'),
+            ('Audio Files', '*.wav *.mp3 *.ogg *.au'),
             ('Todos los archivos', '*.*')
         ]
         
@@ -220,35 +220,89 @@ class GenreClassifierApp:
     def run(self):
         self.root.mainloop()
 
-# ==================== [6. Ejecución Principal] ====================
+# ==================== [7. Guardar y Cargar Modelo] ====================
+def save_model(model, preprocessor, file_path="saved_model.npz"):
+    np.savez(
+        file_path,
+        # Parámetros del modelo
+        W1=model.W1,
+        b1=model.b1,
+        W2=model.W2,
+        b2=model.b2,
+        # Parámetros del preprocesador
+        mean=preprocessor.mean,
+        std=preprocessor.std,
+        label_encoder=preprocessor.label_encoder
+    )
+    print(f"Modelo guardado en {file_path}")
+
+def load_model(file_path="saved_model.npz"):
+    try:
+        data = np.load(file_path, allow_pickle=True)
+        
+        # Reconstruir preprocesador
+        preprocessor = AudioPreprocessor()
+        preprocessor.mean = data['mean']
+        preprocessor.std = data['std']
+        preprocessor.label_encoder = data['label_encoder'].item()
+        
+        # Reconstruir modelo
+        input_size = data['W1'].shape[0]
+        hidden_size = data['W1'].shape[1]
+        output_size = data['W2'].shape[1]
+        
+        mlp = MLP(input_size, hidden_size, output_size)
+        mlp.W1 = data['W1']
+        mlp.b1 = data['b1']
+        mlp.W2 = data['W2']
+        mlp.b2 = data['b2']
+        
+        print(f"Modelo cargado desde {file_path}")
+        return mlp, preprocessor
+        
+    except FileNotFoundError:
+        raise ValueError("Archivo del modelo no encontrado")
+    except Exception as e:
+        raise ValueError(f"Error al cargar el modelo: {str(e)}")
+
+# ==================== [6. Ejecución Principal Modificada] ====================
 if __name__ == "__main__":
-    # Cargar y preprocesar datos
-    X, y = load_dataset()
-    preprocessor = AudioPreprocessor()
-    preprocessor.fit(X, y)
-    X_scaled, y_encoded = preprocessor.transform(X, y)
+    MODEL_PATH = "music_genre_model.npz"
     
-    # Dividir datos (60-20-20)
-    indices = np.random.permutation(len(X))
-    split_train = int(0.6 * len(X))
-    split_val = int(0.8 * len(X))
-    
-    X_train, y_train = X_scaled[indices[:split_train]], y_encoded[indices[:split_train]]
-    X_val, y_val = X_scaled[indices[split_train:split_val]], y_encoded[indices[split_train:split_val]]
-    X_test, y_test = X_scaled[indices[split_val:]], y_encoded[indices[split_val:]]
-    
-    # Entrenar modelo
-    mlp = MLP(input_size=X_train.shape[1], 
-             hidden_size=64,  # Aumentar capacidad
-             output_size=len(preprocessor.label_encoder))
-    
-    mlp.train(X_train, y_train, epochs=500, lr=0.001, batch_size=64,
-             val_data=(X_val, y_val))
-    
-    # Evaluación final
-    test_pred = mlp.predict(X_test)
-    accuracy = np.mean(test_pred == y_test)
-    print(f"\nPrecisión final en test: {accuracy:.2%}")
+    # Intentar cargar modelo existente
+    try:
+        mlp, preprocessor = load_model(MODEL_PATH)
+    except:
+        print("Entrenando nuevo modelo...")
+        # Cargar y preprocesar datos
+        X, y = load_dataset()
+        preprocessor = AudioPreprocessor()
+        preprocessor.fit(X, y)
+        X_scaled, y_encoded = preprocessor.transform(X, y)
+        
+        # Dividir datos (60-20-20)
+        indices = np.random.permutation(len(X))
+        split_train = int(0.6 * len(X))
+        split_val = int(0.8 * len(X))
+        
+        X_train, y_train = X_scaled[indices[:split_train]], y_encoded[indices[:split_train]]
+        X_val, y_val = X_scaled[indices[split_train:split_val]], y_encoded[indices[split_train:split_val]]
+        X_test, y_test = X_scaled[indices[split_val:]], y_encoded[indices[split_val:]]
+        
+        # Entrenar y guardar modelo
+        mlp = MLP(input_size=X_train.shape[1], 
+                 hidden_size=64,
+                 output_size=len(preprocessor.label_encoder))
+        
+        mlp.train(X_train, y_train, epochs=500, lr=0.001, batch_size=64,
+                 val_data=(X_val, y_val))
+        
+        save_model(mlp, preprocessor, MODEL_PATH)
+        
+        # Evaluación final
+        test_pred = mlp.predict(X_test)
+        accuracy = np.mean(test_pred == y_test)
+        print(f"\nPrecisión final en test: {accuracy:.2%}")
     
     # Iniciar interfaz
     app = GenreClassifierApp(mlp, preprocessor)
